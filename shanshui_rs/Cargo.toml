@@ -1,0 +1,15 @@
+[package]
+name = "shanshui_rs"
+version = "0.2.0"
+edition = "2024"
+
+[dependencies]
+png = "0.18"
+resvg = { version = "0.45", default-features = false, features = ["raster-images"] }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
