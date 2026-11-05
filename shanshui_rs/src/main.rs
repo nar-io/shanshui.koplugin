@@ -43,60 +43,33 @@ fn render_svg_to_png_resvg(
     let h = height as usize;
 
     if is_transparent_sky {
-        // Step 1: Detect raw mountain ridge top across each column X.
-        // Sky is strictly the area above the uppermost mountain ridge and horizon.
-        // Rivers, valleys, mist, and foreground landforms must NEVER be pierced by sky.
-        let max_horizon = (h as f32 * 0.45).round() as usize;
-        let mut raw_top = vec![max_horizon; w];
-
+        // Step 1: Detect the mountain ridge skyline across every column X.
+        // Sky is strictly the area above the uppermost mountain ridge.
+        // Everything below (valleys, mist, rivers, pagodas, paper-fills) remains 100% opaque.
+        let mut mountain_top = vec![h; w];
         for x in 0..w {
-            for y in 0..max_horizon {
+            for y in 0..h {
                 let idx = y * w + x;
                 let px = &rgba_data[idx * 4..idx * 4 + 4];
                 let r = px[0] as f32;
                 let g = px[1] as f32;
                 let b = px[2] as f32;
                 let gray = (0.299 * r + 0.587 * g + 0.114 * b).round() as u8;
-
-                // Ink stroke threshold: ink starts where gray < 235
-                if gray < 235 {
-                    raw_top[x] = y;
+                // If any ink stroke appears
+                if gray < 242 {
+                    mountain_top[x] = y;
                     break;
                 }
             }
         }
 
-        // Step 2: Bidirectional slope-constrained ridge envelope.
-        // Mountains and river horizons connect across columns with a natural maximum slope.
-        // This completely prevents rivers, gorges, and valley gaps from plunging into the ground.
-        let max_slope = 0.40f64; // At most ~22 degrees downward slope into gaps/rivers
-
-        let mut left_bound = vec![0.0f64; w];
-        left_bound[0] = raw_top[0] as f64;
-        for x in 1..w {
-            left_bound[x] = (raw_top[x] as f64).min(left_bound[x - 1] + max_slope);
-        }
-
-        let mut right_bound = vec![0.0f64; w];
-        right_bound[w - 1] = raw_top[w - 1] as f64;
-        for x in (0..w - 1).rev() {
-            right_bound[x] = (raw_top[x] as f64).min(right_bound[x + 1] + max_slope);
-        }
-
-        let mut ridge = vec![0.0f64; w];
-        for x in 0..w {
-            ridge[x] = left_bound[x].min(right_bound[x]);
-        }
-
-        // Step 3: Gentle 7-tap moving average for a smooth, natural brush-like skyline
-        let mut smoothed_top = vec![0usize; w];
-        let radius = 3isize;
-        for x in 0..w {
-            let start = (x as isize - radius).max(0) as usize;
-            let end = (x as isize + radius).min(w as isize - 1) as usize;
-            let count = (end - start + 1) as f64;
-            let sum: f64 = ridge[start..=end].iter().sum();
-            smoothed_top[x] = (sum / count).round() as usize;
+        // Step 2: Smooth ridge peaks so sky follows a natural continuous skyline
+        let mut smoothed_top = mountain_top.clone();
+        for x in 1..w - 1 {
+            let left = mountain_top[x - 1];
+            let mid = mountain_top[x];
+            let right = mountain_top[x + 1];
+            smoothed_top[x] = mid.min((left + right) / 2 + 1);
         }
 
         enc.set_color(png::ColorType::Rgba);
