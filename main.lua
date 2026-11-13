@@ -37,20 +37,22 @@ local SETTINGS_PATH = DataStorage:getSettingsDir() .. "/shanshui_settings.lua"
 
 local PROFILES = {
     ["1236x1648"] = { min = 1236, max = 1648, label = "Kindle Paperwhite 5 / 11th Gen (1236x1648)" },
-    ["1404x1872"] = { min = 1404, max = 1872, label = "Kindle Oasis 2/3 / Kobo Libra 2 / Clara 2E (1404x1872)" },
-    ["1072x1448"] = { min = 1072, max = 1448, label = "Kindle PW 3/4 / Voyage / Oasis 1 / Clara HD (1072x1448)" },
-    ["1860x2480"] = { min = 1860, max = 2480, label = "Kindle Scribe / Kobo Elipsa / Boox Note (1860x2480)" },
-    ["1264x1680"] = { min = 1264, max = 1680, label = "Kobo Forma / Sage (1264x1680)" },
+    ["1264x1680"] = { min = 1264, max = 1680, label = "Kindle PW 12th Gen / Colorsoft / Oasis 2-3 / Kobo Libra 2 / Clara 2E (1264x1680)" },
+    ["1072x1448"] = { min = 1072, max = 1448, label = "Kindle PW 3/4 / Voyage / Oasis 1 / Kindle 11th Gen / Clara HD (1072x1448)" },
+    ["1860x2480"] = { min = 1860, max = 2480, label = "Kindle Scribe 10.2\" (1860x2480)" },
+    ["1980x2640"] = { min = 1980, max = 2640, label = "Kindle Scribe 11\" / Scribe Colorsoft (1980x2640)" },
+    ["1404x1872"] = { min = 1404, max = 1872, label = "Kobo Elipsa / Boox Note Air (1404x1872)" },
     ["758x1024"]  = { min = 758,  max = 1024, label = "Kindle Paperwhite 1/2 / Kobo Aura (758x1024)" },
     ["600x800"]   = { min = 600,  max = 800,  label = "Standard / Kindle Basic / Legacy Devices (600x800)" },
 }
 
 local PROFILE_ORDER = {
     "1236x1648",
-    "1404x1872",
+    "1264x1680",
     "1072x1448",
     "1860x2480",
-    "1264x1680",
+    "1980x2640",
+    "1404x1872",
     "758x1024",
     "600x800",
 }
@@ -94,6 +96,21 @@ function ShanShui:detectDeviceProfile()
     local key = string.format("%dx%d", min_dim, max_dim)
     if PROFILES[key] then
         return min_dim, max_dim, key, PROFILES[key].label
+    end
+    -- Nearest known profile: a few devices report a size a couple of pixels off
+    -- the panel spec (e.g. the 11" Scribe), and an exact match would otherwise
+    -- fall through to a stretched "Custom Screen".
+    local best_key, best_delta = nil, math.huge
+    for _, candidate in ipairs(PROFILE_ORDER) do
+        local prof = PROFILES[candidate]
+        local delta = math.abs(prof.min - min_dim) + math.abs(prof.max - max_dim)
+        if delta < best_delta then
+            best_key, best_delta = candidate, delta
+        end
+    end
+    if best_key and best_delta <= 40 then
+        local prof = PROFILES[best_key]
+        return prof.min, prof.max, best_key, prof.label
     end
     if min_dim >= 400 and max_dim >= 600 then
         return min_dim, max_dim, key, string.format(_("Custom Screen (%dx%d)"), min_dim, max_dim)
