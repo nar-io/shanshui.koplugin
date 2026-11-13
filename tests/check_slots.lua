@@ -112,5 +112,71 @@ check("hook marked the image landscape", fake_ss._shanshui_is_landscape == true)
 check("hook marked shanshui active", fake_ss._shanshui_active == true)
 Screen.getRotationMode = real_rot
 
+print("== how many slots does a wake-up regenerate? ==")
+-- Record what the plugin asks the generator for, without spawning it.
+-- The plugin looks for generator.sh under a hardcoded device path; point the
+-- existence check at the repo copy so the spawn path is reachable here.
+local util = require("util")
+local real_pathExists = util.pathExists
+local real_script = PLUGIN .. "/generator.sh"
+util.pathExists = function(path)
+    if path:match("generator%.sh$") then return real_pathExists(real_script) end
+    return real_pathExists(path)
+end
+local spawned = {}
+s.isGeneratorRunning = function() return false end
+s.getOutputDir = function() return OUT end
+local real_execute = os.execute
+os.execute = function(cmd)
+    spawned[#spawned + 1] = cmd
+    return 0
+end
+local function modes_of(cmd)
+    -- The modes list is the last argument before the redirect; %q emits
+    -- double quotes on this platform, single quotes elsewhere.
+    local m = cmd:match('[\'"]([%a,]+)[\'"]%s*>')
+    return m
+end
+
+Screen.getRotationMode = function() return 1 end
+s._last_printed_landscape = nil
+s:onResume()
+-- scheduleIn defers; call the scheduled work directly instead
+spawned = {}
+
+-- Both slots present, nothing printed yet: a wake-up must not render anything.
+s._last_printed_landscape = nil
+local started = s:generateNextInBackground(false, s._last_printed_landscape)
+check("wake-up with no print history renders nothing", started == false and #spawned == 0,
+    #spawned .. " spawn(s)")
+
+-- Portrait was printed: only portrait is regenerated.
+s._last_printed_landscape = "portrait"
+spawned = {}
+started = s:generateNextInBackground(false, s._last_printed_landscape)
+check("wake-up after a portrait print renders 1 slot", started == true and #spawned == 1,
+    #spawned .. " spawn(s)")
+check("and it is the portrait slot", modes_of(spawned[1] or "") == "portrait",
+    modes_of(spawned[1] or ""))
+
+-- Landscape was printed: only landscape.
+s._last_printed_landscape = "landscape"
+spawned = {}
+started = s:generateNextInBackground(false, s._last_printed_landscape)
+check("wake-up after a landscape print renders 1 slot", started == true and #spawned == 1,
+    #spawned .. " spawn(s)")
+check("and it is the landscape slot", modes_of(spawned[1] or "") == "landscape",
+    modes_of(spawned[1] or ""))
+
+-- A settings change still refreshes both.
+spawned = {}
+s:generateNextInBackground(true)
+check("forced refresh renders both slots", #spawned == 1 and modes_of(spawned[1] or "") == "portrait,landscape",
+    modes_of(spawned[1] or ""))
+
+os.execute = real_execute
+util.pathExists = real_pathExists
+Screen.getRotationMode = real_rot
+
 print(string.format("\n%d checks, %d failed", checks, fails))
 os.exit(fails == 0 and 0 or 1)
