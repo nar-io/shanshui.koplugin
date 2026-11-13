@@ -22,7 +22,7 @@ Based on procedural landscape generation algorithms by [LingDong Huang](https://
   - Optional setting toggleable from the plugin menu.
   - Keeps mountain bodies, valleys, and river fills 100% opaque white while rendering **only the sky above the mountain ridges transparent**.
   - Allows current book covers or reading pages to be visible behind the mountain skyline during sleep mode.
-- **Orientation Awareness:** Automatically detects portrait or landscape reading orientation, or allows manual locking.
+- **Orientation Awareness:** Keeps one generated picture per screen formation (`portrait.png` and `landscape.png`), so the screensaver always prints the picture that matches the way the device is being held right now — rotating the screen and going straight to sleep no longer prints the previous formation. Follows the live rotation automatically, or can be locked to portrait/landscape.
 - **Multi-Architecture Support:**
   - `shanshui_armhf`: ARMv7 with hardware VFP/NEON (Kindle PW3/4/5, Oasis, Voyage, modern Kobos).
   - `shanshui_armel`: ARMv6/v7 soft-float (Legacy Kindles: Kindle 3 Keyboard, K4, K5, Touch, PW1/2, Kindle Basic).

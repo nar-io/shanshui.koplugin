@@ -52,6 +52,15 @@ local function isScreenLandscape()
     return (rot % 2 == 1) or (Screen:getWidth() > Screen:getHeight())
 end
 
+-- Formation the screensaver will be printed in. Honours the manual
+-- Orientation setting; "auto" follows the live screen rotation.
+function ShanShui:isScreenFormationLandscape()
+    local ori = self.settings:readSetting("orientation") or "auto"
+    if ori == "landscape" then return true end
+    if ori == "portrait" then return false end
+    return isScreenLandscape()
+end
+
 local function getPNGDimensions(file_path)
     if not file_path then return nil, nil end
     local f = io.open(file_path, "rb")
@@ -133,9 +142,11 @@ function ShanShui:init()
     self.ui.menu:registerToMainMenu(self)
 
     UIManager:nextTick(function()
-        local current = self:getCurrentLandscape()
-        if not current then
-            logger.info("ShanShui: No existing landscape found, triggering initial background generation")
+        -- First launch (or after an upgrade from 1.0.x): make sure both
+        -- formations have a picture, so the very first sleep already prints
+        -- the right one.
+        if self:getMissingSlots() ~= "" then
+            logger.info("ShanShui: missing orientation slot(s), triggering initial background generation")
             self:generateNextInBackground()
         end
     end)
@@ -172,10 +183,21 @@ function ShanShui:isImageLandscape(img_path)
 end
 
 function ShanShui:getCurrentLandscape()
+    -- Preferred slot for the current screen formation, then the other one.
     local out_dir = self:getOutputDir()
-    local current_file = out_dir .. "/current.png"
-    if util.pathExists(current_file) then
-        return current_file
+    local want_ls = self:isScreenFormationLandscape()
+    local order = want_ls and { "landscape", "portrait" } or { "portrait", "landscape" }
+    for _i, suffix in ipairs(order) do
+        local path = out_dir .. "/" .. suffix .. ".png"
+        if util.pathExists(path) then
+            return path
+        end
+    end
+
+    -- Legacy single-slot file from 1.0.x, and the pool as a last resort.
+    local legacy = out_dir .. "/current.png"
+    if util.pathExists(legacy) then
+        return legacy
     end
 
     local pool = self:getLandscapePool()
@@ -186,11 +208,29 @@ function ShanShui:getCurrentLandscape()
     return nil
 end
 
+-- Path of the slot that matches `is_landscape`, or nil when it is missing.
+function ShanShui:getSlotPath(is_landscape)
+    local suffix = is_landscape and "landscape" or "portrait"
+    local path = self:getOutputDir() .. "/" .. suffix .. ".png"
+    if util.pathExists(path) then
+        return path
+    end
+    return nil
+end
+
+-- Slots that still need a picture, as a comma-separated generator argument.
+function ShanShui:getMissingSlots()
+    local missing = {}
+    if not self:getSlotPath(false) then missing[#missing + 1] = "portrait" end
+    if not self:getSlotPath(true) then missing[#missing + 1] = "landscape" end
+    return table.concat(missing, ",")
+end
+
 function ShanShui:getLandscapePool()
     local out_dir = self:getOutputDir()
     local files = {}
     for entry in lfs.dir(out_dir) do
-        if entry:match("%.png$") then
+        if entry:match("^landscape_.*%.png$") then
             table.insert(files, out_dir .. "/" .. entry)
         end
     end
@@ -199,32 +239,31 @@ function ShanShui:getLandscapePool()
 end
 
 function ShanShui:getLandscapeForSleep()
-    local ori = self.settings:readSetting("orientation") or "auto"
-    local want_landscape
-    if ori == "landscape" then
-        want_landscape = true
-    elseif ori == "portrait" then
-        want_landscape = false
-    else
-        want_landscape = isScreenLandscape()
-    end
-
-    local pool = self:getLandscapePool()
-    local current = self:getCurrentLandscape()
+    -- The picture has to match the formation the device is in *now*: the
+    -- previous code picked whatever orientation had been generated last,
+    -- which is why a rotation followed by an immediate sleep printed the
+    -- old formation. Each formation has its own slot, so read that slot.
+    local want_landscape = self:isScreenFormationLandscape()
 
     self.need_refresh_on_resume = true
 
-    if current and self:isImageLandscape(current) == want_landscape then
-        return current
+    local slot = self:getSlotPath(want_landscape)
+    if slot then
+        return slot
     end
 
-    for _idx, path in ipairs(pool) do
-        if self:isImageLandscape(path) == want_landscape then
-            return path
-        end
+    -- The slot for this formation does not exist yet (first run, or the
+    -- background generator has not finished). Fall back to the other slot so
+    -- the screensaver is never blank, and let onResume() fill the gap.
+    logger.info("ShanShui: no " .. (want_landscape and "landscape" or "portrait")
+        .. " slot yet, falling back")
+    local fallback = self:getSlotPath(not want_landscape)
+    if fallback then
+        return fallback
     end
 
-    return current or pool[1]
+    local pool = self:getLandscapePool()
+    return pool[1]
 end
 
 function ShanShui:isGeneratorRunning()
@@ -264,10 +303,17 @@ function ShanShui:generateNextInBackground(force)
 
     local width, height = self:getTargetDimensions()
     local trans_arg = self:isTransparentSky() and "1" or "0"
-    local cmd = string.format("chmod +x %q && nice -n 19 /bin/sh %q %q %d %d %s >/dev/null 2>&1 &",
-        script, script, out_dir, width, height, trans_arg)
-    logger.info(string.format("ShanShui: Spawning background generator (%dx%d, trans=%s): %s",
-        width, height, trans_arg, cmd))
+    -- A forced run (settings change) refreshes both formations; an automatic
+    -- one only fills the slots that are still empty.
+    local modes = force and "portrait,landscape" or self:getMissingSlots()
+    if modes == "" then
+        logger.dbg("ShanShui: both orientation slots are present, nothing to generate")
+        return false
+    end
+    local cmd = string.format("chmod +x %q && nice -n 19 /bin/sh %q %q %d %d %s %q >/dev/null 2>&1 &",
+        script, script, out_dir, width, height, trans_arg, modes)
+    logger.info(string.format("ShanShui: Spawning background generator (%dx%d, trans=%s, modes=%s): %s",
+        width, height, trans_arg, modes, cmd))
     os.execute(cmd)
     return true
 end
@@ -300,6 +346,7 @@ function ShanShui:hookScreensaver()
                 ss_self._shanshui_is_landscape = plugin_self:isImageLandscape(img)
                 logger.info("ShanShui: screensaver active with image:", img,
                     "is_landscape:", ss_self._shanshui_is_landscape,
+                    "screen_landscape:", plugin_self:isScreenFormationLandscape(),
                     "transparent_sky:", plugin_self:isTransparentSky())
             end
         end
@@ -317,36 +364,23 @@ function ShanShui:hookScreensaver()
     end
 
     Screensaver.show = function(ss_self)
-        local restore_rotation = nil
-        if plugin_self:isEnabled() and ss_self._shanshui_active then
-            local cur_rot = Screen:getRotationMode()
-            local is_screen_ls = (cur_rot % 2 == 1)
-            local is_img_ls = ss_self._shanshui_is_landscape
-
-            if is_img_ls and not is_screen_ls then
-                restore_rotation = cur_rot
-                Screen:setRotationMode(Screen.DEVICE_ROTATED_CLOCKWISE)
-            elseif not is_img_ls and is_screen_ls then
-                restore_rotation = cur_rot
-                Screen:setRotationMode(Screen.DEVICE_ROTATED_UPRIGHT)
-            end
-        end
-
+        -- The slot chosen in setup() already matches the current formation, so
+        -- the picture is printed as-is. Rotating the framebuffer here was what
+        -- made the *previous* formation's picture come out sideways: the
+        -- rotation was applied after the image had been picked, and it is not
+        -- undone until the next wake-up.
         orig_show(ss_self)
-
-        if restore_rotation ~= nil then
-            Device.orig_rotation_mode = restore_rotation
-        end
     end
 end
 
 function ShanShui:onSetRotationMode(rotation)
     logger.dbg("ShanShui: onSetRotationMode", rotation)
     if self:isEnabled() and (self.settings:readSetting("orientation") or "auto") == "auto" then
-        local current = self:getCurrentLandscape()
-        local is_ls = (rotation % 2 == 1)
-        if not current or self:isImageLandscape(current) ~= is_ls then
-            logger.info("ShanShui: Screen rotation changed, scheduling generation for new orientation")
+        -- Both formations get their own slot, so a rotation no longer needs a
+        -- fresh render before the next sleep can print the right picture.
+        -- Only fill in what is missing.
+        if self:getMissingSlots() ~= "" then
+            logger.info("ShanShui: Screen rotation changed, ensuring both orientation slots exist")
             UIManager:scheduleIn(2, function()
                 self:generateNextInBackground()
             end)
@@ -363,12 +397,14 @@ end
 
 function ShanShui:onResume()
     logger.dbg("ShanShui: onResume")
-    if self:isEnabled() and self.need_refresh_on_resume then
-        self.need_refresh_on_resume = false
-        UIManager:scheduleIn(2, function()
-            self:generateNextInBackground()
-        end)
-    end
+    if not self:isEnabled() then return end
+    -- Wake-up is the safe moment to regenerate: the screensaver is gone, so
+    -- rewriting a slot cannot race with a print. Fill whichever formation is
+    -- missing (the one that was just used is now free to be replaced).
+    self.need_refresh_on_resume = false
+    UIManager:scheduleIn(2, function()
+        self:generateNextInBackground()
+    end)
 end
 
 function ShanShui:addToMainMenu(menu_items)
@@ -508,7 +544,7 @@ function ShanShui:addToMainMenu(menu_items)
                         local started = self:generateNextInBackground(true)
                         if started then
                             UIManager:show(InfoMessage:new{
-                                text = _("Generating new Shan Shui landscape (~5s)..."),
+                                text = _("Generating new Shan Shui landscapes for both orientations (~10s)..."),
                             })
                         else
                             UIManager:show(InfoMessage:new{
@@ -523,15 +559,21 @@ function ShanShui:addToMainMenu(menu_items)
                 callback = function()
                     local count = #self:getLandscapePool()
                     local w, h = self:getTargetDimensions()
+                    local portrait_ready = self:getSlotPath(false) ~= nil
+                    local landscape_ready = self:getSlotPath(true) ~= nil
                     local info = string.format(
                         _("{Shan, Shui}* Infinite Procedural Landscape\n\n" ..
                           "Procedural Chinese landscape painting screensaver based on LingDong-/shan-shui-inf.\n\n" ..
                           "Target Resolution: %dx%d\n" ..
                           "Transparent Sky: %s\n" ..
+                          "Portrait slot: %s\n" ..
+                          "Landscape slot: %s\n" ..
                           "Stored Landscapes: %d\n" ..
                           "Location: /mnt/us/koreader/screensavers/shanshui"),
                         w, h,
                         self:isTransparentSky() and _("Enabled") or _("Disabled"),
+                        portrait_ready and _("ready") or _("missing"),
+                        landscape_ready and _("ready") or _("missing"),
                         count
                     )
                     UIManager:show(InfoMessage:new{
