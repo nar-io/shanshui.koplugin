@@ -17,6 +17,15 @@ local lfs = require("libs/libkoreader-lfs")
 local util = require("util")
 local _ = require("gettext")
 
+-- Shared across plugin instances.
+--
+-- init() can run more than once per session (FileManager and ReaderUI each
+-- create their own instance), while the screensaver hook is installed once and
+-- closes over whichever instance installed it. Storing "which slot was printed"
+-- on the instance therefore loses the value: setup() writes it on the hook's
+-- instance, onResume() reads it on a different one. Keep it here instead.
+local last_printed_landscape = nil
+
 local ShanShui = WidgetContainer:extend{
     name = "shanshui",
     is_doc_only = false,
@@ -104,21 +113,10 @@ function ShanShui:getTargetDimensions()
         min_dim, max_dim = 600, 800
     end
 
-    local ori = self.settings:readSetting("orientation") or "auto"
-    local is_ls
-    if ori == "portrait" then
-        is_ls = false
-    elseif ori == "landscape" then
-        is_ls = true
-    else
-        is_ls = isScreenLandscape()
-    end
-
-    if is_ls then
-        return max_dim, min_dim
-    else
-        return min_dim, max_dim
-    end
+    -- Always the portrait canvas: generator.sh derives the landscape slot by
+    -- transposing these. Returning the live formation here made the script
+    -- transpose twice, so the landscape slot came out portrait-sized.
+    return min_dim, max_dim
 end
 
 function ShanShui:init()
@@ -138,9 +136,6 @@ function ShanShui:init()
     self.settings:flush()
 
     self.need_refresh_on_resume = false
-    -- Which slot was last sent to the screen; onResume() refreshes exactly
-    -- that one. nil means "nothing printed yet this session".
-    self._last_printed_landscape = nil
     self:hookScreensaver()
     self.ui.menu:registerToMainMenu(self)
 
@@ -358,7 +353,7 @@ function ShanShui:hookScreensaver()
                 ss_self._shanshui_is_landscape = plugin_self:isImageLandscape(img)
                 -- Remember which slot went to the screen: onResume() refreshes
                 -- exactly that one and leaves the other formation ready.
-                plugin_self._last_printed_landscape = ss_self._shanshui_is_landscape
+                last_printed_landscape = ss_self._shanshui_is_landscape
                     and "landscape" or "portrait"
                 logger.info("ShanShui: screensaver active with image:", img,
                     "is_landscape:", ss_self._shanshui_is_landscape,
@@ -390,29 +385,30 @@ function ShanShui:hookScreensaver()
 end
 
 function ShanShui:onSetRotationMode(rotation)
-    logger.dbg("ShanShui: onSetRotationMode", rotation)
+    logger.info("ShanShui: onSetRotationMode", tostring(rotation))
     if self:isEnabled() and (self.settings:readSetting("orientation") or "auto") == "auto" then
-        -- Both formations get their own slot, so a rotation no longer needs a
-        -- fresh render before the next sleep can print the right picture.
-        -- Only fill in what is missing.
-        if self:getMissingSlots() ~= "" then
-            logger.info("ShanShui: Screen rotation changed, ensuring both orientation slots exist")
-            UIManager:scheduleIn(2, function()
-                self:generateNextInBackground()
-            end)
-        end
+        -- The formation just changed, so the slot it will print next may be
+        -- stale: it was generated for an earlier sleep and has not been
+        -- refreshed since. Refresh the slot for the formation we rotated
+        -- into; generateNextInBackground() still fills anything missing.
+        local want_ls = (rotation % 2 == 1)
+        local target = want_ls and "landscape" or "portrait"
+        UIManager:scheduleIn(2, function()
+            logger.info("ShanShui: rotation changed, refreshing the " .. target .. " slot")
+            self:generateNextInBackground(false, target)
+        end)
     end
 end
 
 function ShanShui:onSuspend()
-    logger.dbg("ShanShui: onSuspend")
+    logger.info("ShanShui: onSuspend")
     if self:isEnabled() then
         self.need_refresh_on_resume = true
     end
 end
 
 function ShanShui:onResume()
-    logger.dbg("ShanShui: onResume")
+    logger.info("ShanShui: onResume (last printed:", tostring(last_printed_landscape), ")")
     if not self:isEnabled() then return end
     -- Wake-up is the safe moment to regenerate: the screensaver is gone, so
     -- rewriting a slot cannot race with a print.
@@ -421,7 +417,7 @@ function ShanShui:onResume()
     -- keeps its picture, so rotating and going straight back to sleep still
     -- finds a ready slot for that orientation. That also keeps "a new
     -- landscape every sleep" working without rendering both every wake-up.
-    local printed = self._last_printed_landscape
+    local printed = last_printed_landscape
     self.need_refresh_on_resume = false
     UIManager:scheduleIn(2, function()
         self:generateNextInBackground(false, printed)
